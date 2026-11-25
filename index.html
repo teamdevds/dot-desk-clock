@@ -52,6 +52,7 @@ hr{border:0;border-top:1px solid var(--line);margin:4px 0;width:100%}
 <div id="settings" hidden>
   <form class="card" id="form">
     <h2>Desk clock settings</h2>
+    <p class="note" id="wakeState"></p>
     <div class="row">
       <input type="text" id="city" placeholder="City for weather, e.g. Chennai" autocomplete="off">
       <button type="button" id="find">Find</button>
@@ -673,10 +674,19 @@ function render(){
 }
 
 /* ---------- screen: full screen, landscape, stay awake ---------- */
-let lock = null;
+// Keep the screen on: ask as soon as the clock opens (no tap needed), and ask again
+// whenever Android drops the request (app hidden, battery saver, screen briefly off).
+let lock = null, wakeErr = '';
 async function wake(){
-  try { if ('wakeLock' in navigator && !lock){ lock = await navigator.wakeLock.request('screen'); lock.addEventListener('release', () => lock = null); } } catch {}
+  if (!('wakeLock' in navigator)){ wakeErr = 'This browser cannot keep the screen on by itself.'; return; }
+  if (lock || document.visibilityState !== 'visible') return;
+  try {
+    lock = await navigator.wakeLock.request('screen'); wakeErr = '';
+    lock.addEventListener('release', () => { lock = null; });
+  } catch (e) { lock = null; wakeErr = 'The browser refused to keep the screen on (' + (e.message || e.name) + '). Battery saver can cause this.'; }
 }
+wake();
+setInterval(wake, 30000);
 async function goFull(){
   try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen({navigationUI:'hide'}); } catch {}
   try { await screen.orientation.lock('landscape'); } catch {}
@@ -703,6 +713,8 @@ const $ = id => document.getElementById(id), status = $('status');
 function openSettings(){
   $('city').value = S.city || ''; $('h12').value = S.h12 ? '1' : '0'; $('unit').value = S.unit;
   $('rotate').checked = S.rotate; $('dim').checked = S.dim; $('anim').value = S.anim;
+  $('wakeState').textContent = lock ? 'Screen: kept on while the clock is open.' : (wakeErr || 'Screen: not kept on yet. Close settings and it will try again.');
+  $('wakeState').style.color = lock ? 'var(--green)' : 'var(--amber)';
   $('rainOn').checked = S.rainOn; $('rainFrom').value = S.rainFrom; $('rainTo').value = S.rainTo;
   $('stockSym').value = S.stockSym; $('stockKey').value = S.stockKey; $('stockFrom').value = S.stockFrom; $('stockTo').value = S.stockTo;
   $('stockState').textContent = !S.stockKey ? 'Add a free Twelve Data key to show ' + (S.stockSym || 'your stock') + ' every day.'
