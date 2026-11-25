@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Dot Desk Clock</title>
+<style>
+/* One full-screen LED matrix (96 x 44 dots) drawn on a canvas; settings live in an overlay.
+   Open copies check for a newer version every minute and reload themselves. */
+:root{
+  --bg:#000;
+  --panel:#15130f;
+  --fg:#efe8dc;
+  --muted:#8c8478;
+  --amber:#ffa51f;
+  --line:#2b2721;
+  --green:#1ed760;
+  --ui:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  color-scheme:dark;
+}
+html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;touch-action:manipulation;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+#hint{position:fixed;left:50%;bottom:max(14px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);font:13px/1.35 var(--ui);color:var(--muted);transition:opacity .8s;pointer-events:none;text-align:center;white-space:nowrap}
+#settings{position:fixed;inset:0;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;font:15px/1.4 var(--ui);color:var(--fg);-webkit-user-select:text;user-select:text}
+[hidden]{display:none!important}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;width:min(460px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;display:grid;gap:14px;box-sizing:border-box}
+.card h2{margin:0;font-size:17px;font-weight:600;letter-spacing:.02em}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row label{flex:1 1 140px;color:var(--muted);font-size:13px;text-transform:uppercase;letter-spacing:.06em}
+input[type=text],select{flex:1 1 180px;min-width:0;background:#000;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit}
+button{background:#231f19;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer}
+button.primary{background:var(--amber);color:#1a1207;border-color:var(--amber);font-weight:600}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+#status{min-height:1.4em;font-size:13px;color:var(--muted)}
+.check{display:flex;gap:10px;align-items:center}
+.check input{width:18px;height:18px;accent-color:var(--amber)}
+.card h3{margin:6px 0 0;font-size:14px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--green)}
+.note{margin:0;font-size:13px;color:var(--muted)}
+.note code{color:var(--fg);word-break:break-all;font-size:12px}
+hr{border:0;border-top:1px solid var(--line);margin:4px 0;width:100%}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">Tap to switch view and go full screen · hold for settings</div>
+
+<div id="settings" hidden>
+  <form class="card" id="form">
+    <h2>Desk clock settings</h2>
+    <div class="row">
+      <input type="text" id="city" placeholder="City for weather, e.g. Chennai" autocomplete="off">
+      <button type="button" id="find">Find</button>
+    </div>
+    <div class="row"><button type="button" id="geo">Use my location</button></div>
+    <div id="status"></div>
+    <div class="row"><label for="h12">Clock</label>
+      <select id="h12"><option value="1">12-hour</option><option value="0">24-hour</option></select></div>
+    <div class="row"><label for="unit">Temperature</label>
+      <select id="unit"><option value="c">°C</option><option value="f">°F</option></select></div>
+    <div class="row"><label for="anim">View change</label>
+      <select id="anim"><option value="flicker">Flicker (dots switch off and on)</option><option value="scroll">Scroll (LED sign)</option></select></div>
+    <label class="check"><input type="checkbox" id="rotate"> Switch views automatically</label>
+    <label class="check"><input type="checkbox" id="dim"> Night mode from 11 PM to 6 AM: a small dim clock that moves around (tap to see everything)</label>
+    <hr>
+    <h3>Spotify now playing</h3>
+    <p class="note" id="spState"></p>
+    <div class="row" id="spConnectRow">
+      <input type="text" id="spClient" placeholder="Client ID from your Spotify app" autocomplete="off" spellcheck="false">
+      <button type="button" id="spGo">Connect</button>
+    </div>
+    <p class="note" id="spUriNote">Redirect URI to add in your Spotify app: <code id="spUri"></code></p>
+    <div class="row" id="spOffRow"><button type="button" id="spOff">Disconnect Spotify</button></div>
+    <div class="row" style="justify-content:flex-end"><button type="submit" class="primary">Done</button></div>
+  </form>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------- matrix ---------- */
+const COLS = 96, ROWS = 44;
+// 1 white, 2 amber, 3 blue, 4 dim white, 5 cloud grey, 6 dim blue track, 7 dim amber, 8 green, 9 dim green
+// 17..231 = album-art colours (6 levels per channel), see colorOf()
+const PAL = {1:'#fff3e0',2:'#ffa51f',3:'#4a74ff',4:'#6f675c',5:'#c8c1b6',6:'#1c2650',7:'#7a4c0c',8:'#1ed760',9:'#0b3d20'};
+const OFF = '#17140f';
+const buf = new Uint8Array(COLS*ROWS), prev = new Uint8Array(COLS*ROWS);
+let SX = 0, SY = 0; // anti burn-in shift, in dots
+let CX0 = 0, CX1 = COLS-1; // horizontal clip, for scrolling text
+
+const px = (x,y,c) => { x|=0; y|=0; if (x<CX0 || x>CX1) return; x += SX; y += SY; if (x>=0 && y>=0 && x<COLS && y<ROWS) buf[y*COLS+x] = c; };
+const disc = (cx,cy,r,c) => { for (let y=-r;y<=r;y++) for (let x=-r;x<=r;x++) if (x*x+y*y <= r*r + r*.8) px(cx+x,cy+y,c); };
+const rect = (x0,y0,x1,y1,c) => { for (let y=y0;y<=y1;y++) for (let x=x0;x<=x1;x++) px(x,y,c); };
+function line(x0,y0,x1,y1,c){
+  const dx=Math.abs(x1-x0), dy=-Math.abs(y1-y0), sx=x0<x1?1:-1, sy=y0<y1?1:-1; let e=dx+dy;
+  for(;;){ px(x0,y0,c); if (x0===x1 && y0===y1) break; const e2=2*e; if (e2>=dy){e+=dy;x0+=sx} if (e2<=dx){e+=dx;y0+=sy} }
+}
+
+/* ---------- 5x7 font ---------- */
+const F = {
+ '0':[14,17,17,17,17,17,14],'1':[4,12,4,4,4,4,14],'2':[14,17,1,2,4,8,31],'3':[31,2,4,2,1,17,14],
+ '4':[2,6,10,18,31,2,2],'5':[31,16,30,1,1,17,14],'6':[6,8,16,30,17,17,14],'7':[31,1,2,4,8,8,8],
+ '8':[14,17,17,14,17,17,14],'9':[14,17,17,15,1,2,12],
+ A:[14,17,17,31,17,17,17],B:[30,17,17,30,17,17,30],C:[14,17,16,16,16,17,14],D:[30,17,17,17,17,17,30],
+ E:[31,16,16,30,16,16,31],F:[31,16,16,30,16,16,16],G:[14,17,16,23,17,17,15],H:[17,17,17,31,17,17,17],
+ I:[14,4,4,4,4,4,14],J:[7,2,2,2,2,18,12],K:[17,18,20,24,20,18,17],L:[16,16,16,16,16,16,31],
+ M:[17,27,21,21,17,17,17],N:[17,17,25,21,19,17,17],O:[14,17,17,17,17,17,14],P:[30,17,17,30,16,16,16],
+ Q:[14,17,17,17,21,18,13],R:[30,17,17,30,20,18,17],S:[15,16,16,14,1,1,30],T:[31,4,4,4,4,4,4],
+ U:[17,17,17,17,17,17,14],V:[17,17,17,17,17,10,4],W:[17,17,17,21,21,21,10],X:[17,17,10,4,10,17,17],
+ Y:[17,17,17,10,4,4,4],Z:[31,1,2,4,8,16,31],
+ ':':[0,1,1,0,1,1,0],'°':[2,5,2,0,0,0,0],' ':[0,0,0,0,0,0,0],'-':[0,0,0,31,0,0,0],'.':[0,0,0,0,0,0,1],
+ '?':[14,17,1,2,4,0,4],'&':[12,18,20,8,21,18,13],'(':[1,2,4,4,4,2,1],')':[4,2,1,1,1,2,4],
+ ',':[0,0,0,0,1,1,2],'!':[1,1,1,1,1,0,1],"'":[1,1,0,0,0,0,0],'/':[1,1,2,4,8,16,16],'+':[0,4,4,31,4,4,0],
+ '#':[10,10,31,10,31,10,10],'_':[0,0,0,0,0,0,31]
+};
+const GW = {':':1,'°':3,' ':3,'.':1,'(':3,')':3,',':2,'!':1,"'":1};
+const gw = ch => GW[ch] ?? 5;
+// Upper-case, strip accents, drop characters the font cannot draw.
+const clean = s => [...String(s).normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase()].filter(ch => F[ch]).join('').replace(/ {2,}/g,' ').trim();
+const measure = (s,sc=1) => { let w=0; for (const ch of clean(s)) w += gw(ch)*sc + sc; return Math.max(0,w-sc); };
+function text(s,x,y,c,sc=1){
+  for (const ch of clean(s)){
+    const w=gw(ch), g=F[ch];
+    for (let r=0;r<7;r++) for (let col=0;col<w;col++)
+      if ((g[r]>>(w-1-col))&1) rect(x+col*sc, y+r*sc, x+col*sc+sc-1, y+r*sc+sc-1, c);
+    x += w*sc + sc;
+  }
+  return x;
+}
+
+/* ---------- settings ---------- */
+const KEY = 'dotdeskclock.v1';
+const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || {}; } catch { return {}; } };
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch {} };
+const S = Object.assign({city:'', lat:null, lon:null, h12:true, unit:'c', rotate:true, dim:true, anim:'flicker'}, load());
+const q = new URLSearchParams(location.search);
+if (q.has('h12')) S.h12 = q.get('h12') !== '0';
+if (q.has('unit')) S.unit = q.get('unit') === 'f' ? 'f' : 'c';
+if (q.has('lat') && q.has('lon')) { S.lat = +q.get('lat'); S.lon = +q.get('lon'); S.city = q.get('city') || 'LOCATION'; }
+
+/* ---------- weather (Open-Meteo, no key) ---------- */
+let wx = null;
+try { wx = JSON.parse(localStorage.getItem(KEY+'.wx')) || null; } catch {}
+
+async function geocode(name){
+  const r = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=' + encodeURIComponent(name));
+  const j = await r.json();
+  if (!j.results || !j.results.length) throw new Error('No place called "' + name + '" was found. Try a nearby larger city.');
+  const p = j.results[0];
+  return {lat:p.latitude, lon:p.longitude, label:p.name + (p.country ? ', ' + p.country : '')};
+}
+
+async function fetchWeather(){
+  if (S.lat == null) return;
+  const u = 'https://api.open-meteo.com/v1/forecast?latitude=' + S.lat + '&longitude=' + S.lon +
+    '&current=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min' +
+    '&timezone=auto&forecast_days=2' + (S.unit === 'f' ? '&temperature_unit=fahrenheit' : '');
+  try {
+    const j = await (await fetch(u)).json();
+    wx = { cur: j.current.temperature_2m, code: j.current.weather_code, day: !!j.current.is_day,
+           hi: j.daily.temperature_2m_max, lo: j.daily.temperature_2m_min, codes: j.daily.weather_code, at: Date.now() };
+    try { localStorage.setItem(KEY+'.wx', JSON.stringify(wx)); } catch {}
+  } catch (e) { /* keep the last good reading */ }
+}
+
+function kind(code){
+  if (code === 0) return 'clear';
+  if (code <= 2) return 'partly';
+  if (code === 3) return 'cloud';
+  if (code === 45 || code === 48) return 'fog';
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return 'snow';
+  if (code >= 95) return 'storm';
+  return 'rain';
+}
+
+/* ---------- icons (left 44 x 33 area) ---------- */
+function sun(cx,cy,r,ray){
+  disc(cx,cy,r,2);
+  for (let a=0;a<8;a++){ const t=a*Math.PI/4;
+    for (let k=r+3;k<=r+3+ray;k++) px(Math.round(cx+Math.cos(t)*k), Math.round(cy+Math.sin(t)*k), 2); }
+}
+function moon(cx,cy,r){ disc(cx,cy,r,2); disc(cx+Math.round(r*.55),cy-Math.round(r*.4),r-1,0); }
+function cloud(cx,cy,c,g=0){
+  disc(cx-9,cy+2,6+g,c); disc(cx,cy-3,8+g,c); disc(cx+9,cy+2,6+g,c); rect(cx-9,cy+2,cx+9,cy+8+g,c);
+}
+function icon(k, day, f){
+  if (k === 'clear'){
+    if (day) sun(21,16,10,3);
+    else { moon(20,16,11); [[37,5],[40,15],[33,26],[6,6]].forEach(([x,y],i)=>px(x,y,(f>>2)%4===i?1:3)); }
+  } else if (k === 'partly'){
+    day ? sun(14,11,7,2) : moon(14,11,8);
+    cloud(25,19,0,1); cloud(25,19,5);
+  } else if (k === 'cloud'){
+    cloud(28,10,4); cloud(19,17,0,1); cloud(19,17,5);
+  } else if (k === 'fog'){
+    for (let i=0;i<5;i++){ const y=6+i*5, o=(i%2)*3; for (let x=4+o;x<40;x+=1) if ((x+o)%7<5) px(x,y,i%2?4:5); }
+  } else {
+    const flash = k === 'storm' && (f%20) < 2;
+    cloud(21,10,flash ? 1 : 5);
+    if (k === 'storm'){ const b=[[23,20],[18,27],[23,27],[18,33]]; for (let i=0;i<3;i++){ line(...b[i],...b[i+1],2); line(b[i][0]+1,b[i][1],b[i+1][0]+1,b[i+1][1],2); } }
+    else for (let i=0;i<6;i++){
+      const x = 8 + i*5, speed = k === 'snow' ? 2 : 1;
+      const y = 21 + ((Math.floor(f/speed) + i*4) % 12);
+      if (k === 'snow') px(x + ((y>>1)%2), y, 1);
+      else { px(x,y,3); px(x-1,y-1,3); }
+    }
+  }
+}
+
+/* ---------- pages ---------- */
+const DAYS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+const MONS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+const deg = v => Math.round(v) + '°';
+
+function pageClock(now){
+  const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
+  const hs = S.h12 ? String((h%12)||12) : String(h).padStart(2,'0');
+  const ms = String(m).padStart(2,'0');
+  const sc = 3, gap = sc;
+  const wH = measure(hs,sc), wC = measure(':',sc), wM = measure(ms,sc);
+  const total = wH + gap + wC + gap + wM;
+  const block = measure('00:00',sc), bx = Math.round((COLS-block)/2);
+  const x0 = Math.round((COLS-total)/2);
+  text(hs, x0, 6, 1, sc);
+  text(':', x0+wH+gap, 6, s%2 ? 4 : 1, sc);
+  text(ms, x0+wH+gap+wC+gap, 6, 1, sc);
+
+  text(DAYS[now.getDay()] + ' ' + now.getDate() + ' ' + MONS[now.getMonth()], bx, 32, 1);
+  if (wx){ const t = deg(wx.cur); text(t, bx+block-measure(t), 32, 2); }
+  else if (S.h12){ const ap = h < 12 ? 'AM' : 'PM'; text(ap, bx+block-measure(ap), 32, 2); }
+
+}
+
+function pageWeather(now, f){
+  if (!wx){
+    const a = S.lat == null ? 'NO CITY SET' : 'LOADING', b = 'HOLD FOR SETUP';
+    text(a, Math.round((COLS-measure(a))/2), 14, 1);
+    text(b, Math.round((COLS-measure(b))/2), 25, 2);
+    return;
+  }
+  icon(kind(wx.code), wx.day, f);
+  const d = now.getDay();
+  text(DAYS[d], 3, 35, 1);
+  text(deg(wx.cur), 26, 35, 2);
+  const col = (x1, i) => {
+    const hi = deg(wx.hi[i]), lo = deg(wx.lo[i]);
+    text(hi, x1-measure(hi)+1, 17, 1);
+    text(lo, x1-measure(lo)+1, 28, 4);
+  };
+  col(67, 0);
+  const odd = Math.floor(Date.now()/60000) % 2; // dotted divider, alternating dots each minute
+  for (let y=3;y<=40;y++) if (y%2 === odd) px(72, y, 3);
+  text(DAYS[(d+1)%7], 77, 3, 1);
+  col(93, 1);
+}
+
+/* ---------- Spotify now playing (Authorization Code + PKCE, no server) ---------- */
+const SP_KEY = KEY + '.sp';
+let sp = (() => { try { return JSON.parse(localStorage.getItem(SP_KEY)) || {}; } catch { return {}; } })();
+const spSave = () => { try { localStorage.setItem(SP_KEY, JSON.stringify(sp)); } catch {} };
+const redirectUri = () => location.origin + location.pathname;
+const b64url = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+let np = null, spErr = '', spWait = 0;
+
+async function spConnect(clientId){
+  if (!window.isSecureContext || !crypto.subtle) throw new Error('Spotify sign-in only works when this page is opened from an https:// address.');
+  const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(12)));
+  sp = {clientId, verifier, state}; spSave();
+  location.href = 'https://accounts.spotify.com/authorize?' + new URLSearchParams({
+    client_id: clientId, response_type: 'code', redirect_uri: redirectUri(), state,
+    code_challenge_method: 'S256', code_challenge: challenge,
+    scope: 'user-read-currently-playing user-read-playback-state'});
+}
+async function spToken(params){
+  const r = await fetch('https://accounts.spotify.com/api/token', {method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: new URLSearchParams({client_id: sp.clientId, ...params})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok){
+    if (params.grant_type === 'refresh_token' && j.error === 'invalid_grant'){ delete sp.refresh; delete sp.access; spSave(); np = null; }
+    throw new Error(j.error_description || j.error || 'Spotify sign-in failed.');
+  }
+  sp.access = j.access_token; if (j.refresh_token) sp.refresh = j.refresh_token;
+  sp.exp = Date.now() + (j.expires_in - 60) * 1000; delete sp.verifier; delete sp.state; spSave();
+}
+async function spFinishLogin(){
+  const code = q.get('code'), err = q.get('error');
+  if (!code && !err) return;
+  history.replaceState(null, '', redirectUri());
+  if (err){ spErr = 'Spotify sign-in was cancelled.'; return; }
+  if (q.get('state') !== sp.state || !sp.verifier){ spErr = 'Spotify sign-in expired. Tap Connect again.'; return; }
+  try { await spToken({grant_type:'authorization_code', code, redirect_uri: redirectUri(), code_verifier: sp.verifier}); spPoll(); }
+  catch (e){ spErr = e.message; }
+}
+async function spPoll(){
+  if (!sp.refresh || Date.now() < spWait || document.visibilityState !== 'visible') return;
+  try {
+    if (!sp.access || Date.now() > sp.exp) await spToken({grant_type:'refresh_token', refresh_token: sp.refresh});
+    const r = await fetch('https://api.spotify.com/v1/me/player/currently-playing?additional_types=episode', {headers:{Authorization:'Bearer ' + sp.access}});
+    if (r.status === 401){ sp.exp = 0; return; }
+    if (r.status === 429){ spWait = Date.now() + ((+r.headers.get('Retry-After')) || 30) * 1000; return; }
+    if (r.status === 204 || !r.ok){ setNp(null); return; }
+    const j = await r.json(), it = j.item;
+    if (!it){ setNp(null); return; }
+    const imgs = (it.album && it.album.images) || it.images || [];
+    setNp({ id: it.id || it.uri, title: it.name,
+      artist: (it.artists || []).map(a => a.name).join(', ') || (it.show && it.show.name) || '',
+      playing: !!j.is_playing, prog: j.progress_ms || 0, dur: it.duration_ms || 0, at: Date.now(),
+      img: imgs.length ? imgs[imgs.length-1].url : null });
+  } catch (e) { /* network blip: try again next poll */ }
+}
+function setNp(n){
+  const was = np;
+  if (n && was && n.id === was.id) n.art = was.art; else if (n) loadArt(n);
+  np = n;
+  // A new song, or playback resuming, brings the now-playing view forward.
+  if (n && n.playing && (!was || !was.playing || was.id !== n.id))setPage('music');
+}
+function loadArt(n){
+  n.art = null; if (!n.img) return;
+  const img = new Image(); img.crossOrigin = 'anonymous';
+  img.onload = () => {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = ART;
+      const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(img, 0, 0, ART, ART);
+      const d = g.getImageData(0, 0, ART, ART).data, a = new Uint8Array(ART*ART), lv = v => Math.min(5, Math.round(v/51));
+      for (let i=0;i<a.length;i++){ const code = 16 + lv(d[i*4])*36 + lv(d[i*4+1])*6 + lv(d[i*4+2]); a[i] = code === 16 ? 0 : code; }
+      n.art = a; prev.fill(255);
+    } catch { /* image could not be read; the note icon stays */ }
+  };
+  img.src = n.img;
+}
+
+const ART = 30;
+const mmss = ms => { const s = Math.max(0, Math.floor(ms/1000)); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); };
+function marquee(s, x0, x1, y, c, f){
+  const w = measure(s), avail = x1 - x0 + 1;
+  CX0 = x0; CX1 = x1;
+  if (w <= avail) text(s, x0, y, c);
+  else { const cycle = w + 14, off = Math.max(0, (f % (cycle + 24)) - 24); text(s, x0-off, y, c); text(s, x0-off+cycle, y, c); }
+  CX0 = 0; CX1 = COLS-1;
+}
+function pageMusic(now, f){
+  if (np.art) for (let i=0;i<np.art.length;i++){ if (np.art[i]) px(2 + i%ART, 2 + ((i/ART)|0), np.art[i]); }
+  else { // music note
+    disc(11,23,4,8); disc(23,20,4,8); rect(14,7,15,23,8); rect(26,5,27,20,8); line(14,7,27,4,8); line(14,8,27,5,8);
+  }
+  const t = clean(np.title) || '...', a = clean(np.artist);
+  marquee(t, 36, 93, 3, 1, f);
+  marquee(a, 36, 93, 13, 5, f);
+  if (np.playing) for (let i=0;i<5;i++){
+    const h = 1 + Math.round((Math.sin(f*.45 + i*1.9) + Math.sin(f*.23 + i*.7) + 2) * 1.75);
+    rect(36 + i*4, 31-h+1, 38 + i*4, 31, 8);
+  } else { rect(36,25,37,31,2); rect(40,25,41,31,2); }
+  const h = now.getHours(), clock = (S.h12 ? String((h%12)||12) : String(h).padStart(2,'0')) + ':' + String(now.getMinutes()).padStart(2,'0');
+  text(clock, 94 - measure(clock), 25, 2);
+
+  const pos = Math.min(np.dur, np.prog + (np.playing ? Date.now() - np.at : 0));
+  text(mmss(pos), 2, 33, 4);
+  const d = mmss(np.dur); text(d, 94 - measure(d), 33, 4);
+  const lit = np.dur ? Math.round(pos / np.dur * 92) : 0;
+  for (let x=0;x<lit;x++) px(2+x, 41, 8);
+}
+
+/* Night: a small dim amber clock that moves to a new spot every 5 minutes. */
+const rnd = n => ((n*9301 + 49297) % 233280) / 233280;
+function pageNight(now){
+  const h = now.getHours();
+  const t = (S.h12 ? String((h%12)||12) : String(h).padStart(2,'0')) + ':' + String(now.getMinutes()).padStart(2,'0');
+  const w = measure(t,2), slot = Math.floor(now.getTime()/300000);
+  const x = 2 + Math.floor(rnd(slot) * (COLS - 4 - w)), y = 2 + Math.floor(rnd(slot + 7) * (ROWS - 4 - 14));
+  text(t, x, y, 2, 2);
+}
+
+/* ---------- canvas ---------- */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let P = 10, OX = 0, OY = 0, BXf = 0, BYf = 0, bg = null, sprites = {};
+function rgba(hex,a){ const n=parseInt(hex.slice(1),16); return 'rgba('+(n>>16)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
+function sprite(color){
+  const s = Math.max(2, Math.ceil(P)), c = document.createElement('canvas'); c.width = c.height = s;
+  const g = c.getContext('2d'), r = s/2, gr = g.createRadialGradient(r,r,0,r,r,r);
+  gr.addColorStop(0, color); gr.addColorStop(.6, color); gr.addColorStop(.72, rgba(color,.28)); gr.addColorStop(1, rgba(color,0));
+  g.fillStyle = gr; g.fillRect(0,0,s,s); return c;
+}
+function resize(){
+  const dpr = window.devicePixelRatio || 1, W = Math.round(innerWidth*dpr), H = Math.round(innerHeight*dpr);
+  cv.width = W; cv.height = H;
+  P = Math.min(W/COLS, H/ROWS); OX = (W - P*COLS)/2; OY = (H - P*ROWS)/2;
+  bg = document.createElement('canvas'); bg.width = W; bg.height = H;
+  const g = bg.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0,0,W,H); g.fillStyle = OFF;
+  for (let y=0;y<ROWS;y++) for (let x=0;x<COLS;x++){ g.beginPath(); g.arc(OX+(x+.5)*P, OY+(y+.5)*P, P*.34, 0, Math.PI*2); g.fill(); }
+  sprites = {};
+  prev.fill(255);
+}
+function colorOf(c){
+  if (PAL[c]) return PAL[c];
+  const v = c - 16, h = n => (n*51).toString(16).padStart(2,'0');
+  return '#' + h(Math.floor(v/36)) + h(Math.floor(v/6)%6) + h(v%6);
+}
+function draw(alpha){
+  const dx = BXf*P, dy = BYf*P;
+  ctx.globalAlpha = 1; ctx.fillStyle = '#000'; ctx.fillRect(0,0,cv.width,cv.height); ctx.drawImage(bg,dx,dy); ctx.globalAlpha = alpha;
+  for (let i=0;i<buf.length;i++){ const c = buf[i]; if (c) ctx.drawImage(sprites[c] || (sprites[c] = sprite(colorOf(c))), OX+dx+(i%COLS)*P, OY+dy+((i/COLS)|0)*P, P, P); }
+}
+
+/* ---------- loop ---------- */
+let page = 'clock', pageAt = Date.now(), frame = 0, lastAlpha = -1, lastShift = -1, peekUntil = 0;
+const SPAN = {clock:25000, weather:10000, music:30000};
+const views = () => np ? ['clock','weather','music'] : ['clock','weather'];
+function nextView(){ const v = views(); setPage(v[(v.indexOf(page)+1) % v.length]); }
+
+/* View change: the old view scrolls up row by row while the new one rises from below, like an LED sign. */
+let trans = null;
+const oldBuf = new Uint8Array(COLS*ROWS);
+const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Flicker style: each dot gets a switch-off and a switch-on moment from patchy noise plus jitter,
+// so dots drop out in irregular clusters and the new view lights up the same way.
+const thrOff = new Float32Array(COLS*ROWS), thrOn = new Float32Array(COLS*ROWS);
+function patchyNoise(out){
+  const gx = 13, gy = 7, g = Array.from({length: gx*gy}, Math.random);
+  for (let y=0;y<ROWS;y++) for (let x=0;x<COLS;x++){
+    const fx = x/(COLS-1)*(gx-1), fy = y/(ROWS-1)*(gy-1), x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const x1 = Math.min(gx-1, x0+1), y1 = Math.min(gy-1, y0+1), tx = fx-x0, ty = fy-y0;
+    const top = g[y0*gx+x0]*(1-tx) + g[y0*gx+x1]*tx, bot = g[y1*gx+x0]*(1-tx) + g[y1*gx+x1]*tx;
+    out[y*COLS+x] = Math.min(1, Math.max(0, .62*(top*(1-ty) + bot*ty) + .38*Math.random()));
+  }
+}
+function setPage(p){
+  if (p === page) return;
+  if (!reduceMotion){
+    const startAnim = !trans, style = S.anim === 'scroll' ? 'scroll' : 'flicker';
+    trans = {from: page, start: performance.now(), style, dur: style === 'scroll' ? 650 : 1100};
+    if (style === 'flicker'){ patchyNoise(thrOff); patchyNoise(thrOn); }
+    if (startAnim) requestAnimationFrame(animate);
+  }
+  page = p; pageAt = Date.now(); prev.fill(255);
+}
+function animate(){ render(); if (trans) requestAnimationFrame(animate); }
+
+function tick(){
+  if (page === 'music' && !np) setPage('clock');
+  if (S.rotate){
+    const playing = np && np.playing;
+    const order = playing ? ['clock','music'] : wx ? ['clock','weather'] : ['clock'];
+    const span = playing && page === 'clock' ? 12000 : SPAN[page];
+    if (Date.now() - pageAt > span){ const i = order.indexOf(page); setPage(order[(i+1) % order.length]); }
+  }
+  frame++;
+  render();
+}
+function drawView(v, now){
+  buf.fill(0);
+  if (v === 'night') pageNight(now);
+  else if (v === 'music' && np) pageMusic(now, frame);
+  else if (v === 'weather') pageWeather(now, frame >> 1);
+  else pageClock(now);
+}
+function render(){
+  const now = new Date(), h = now.getHours();
+  // Burn-in protection: every minute move the content up to 2 dots and the whole grid by part of a dot.
+  const slot = Math.floor(now.getTime() / 60000);
+  if (slot !== lastShift){
+    lastShift = slot; const r = () => Math.floor(Math.random()*5) - 2;
+    SX = r(); SY = r(); BXf = Math.random()*.8 - .4; BYf = Math.random()*.8 - .4; prev.fill(255);
+  }
+  const night = S.dim && (h >= 23 || h < 6) && Date.now() > peekUntil;
+  const view = night && !(np && np.playing) ? 'night' : page;
+  const t = trans ? (performance.now() - trans.start) / trans.dur : 1;
+  if (t >= 1 || view === 'night'){ trans = null; drawView(view, now); }
+  else {
+    drawView(trans.from, now); oldBuf.set(buf); drawView(view, now);
+    if (trans.style === 'flicker'){
+      // old dots go out over the first half, new dots come on from 40% to the end (short overlap)
+      const a = t / .5, b = (t - .4) / .5, band = .09, fresh = buf.slice();
+      for (let i=0;i<buf.length;i++){
+        let on = false;
+        if (fresh[i]){ const d = b - thrOn[i]; on = d > band || (d > -band && Math.random() < .5 + d/(2*band)); }
+        if (on){ buf[i] = fresh[i]; continue; }
+        let old = false;
+        if (oldBuf[i]){ const d = thrOff[i] - a; old = d > band || (d > -band && Math.random() < .5 + d/(2*band)); }
+        buf[i] = old ? oldBuf[i] : 0;
+      }
+    } else {
+    const e = t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; // ease in-out
+    const gap = 3, off = Math.round(e * (ROWS + gap)), fresh = buf.slice();
+    for (let y=0;y<ROWS;y++){
+      const sy = y + off, row = y*COLS;
+      if (sy < ROWS) buf.set(oldBuf.subarray(sy*COLS, sy*COLS + COLS), row);
+      else if (sy < ROWS + gap) buf.fill(0, row, row + COLS);
+      else buf.set(fresh.subarray((sy-ROWS-gap)*COLS, (sy-ROWS-gap)*COLS + COLS), row);
+    }
+    }
+  }
+  const alpha = night ? .45 :S.dim && (h >= 23 || h < 6) ? .4 : .85;
+  let changed = alpha !== lastAlpha;
+  if (!changed) for (let i=0;i<buf.length;i++) if (buf[i] !== prev[i]){ changed = true; break; }
+  if (changed){ draw(alpha); prev.set(buf); lastAlpha = alpha; }
+}
+
+/* ---------- screen: full screen, landscape, stay awake ---------- */
+let lock = null;
+async function wake(){
+  try { if ('wakeLock' in navigator && !lock){ lock = await navigator.wakeLock.request('screen'); lock.addEventListener('release', () => lock = null); } } catch {}
+}
+async function goFull(){
+  try { if (!document.fullscreenElement) await document.documentElement.requestFullscreen({navigationUI:'hide'}); } catch {}
+  try { await screen.orientation.lock('landscape'); } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible'){ wake(); fetchWeather(); } });
+
+/* ---------- input ---------- */
+const panel = document.getElementById('settings'), hint = document.getElementById('hint');
+let holdT = null, held = false;
+cv.addEventListener('pointerdown', () => { held = false; holdT = setTimeout(() => { held = true; openSettings(); }, 650); });
+cv.addEventListener('pointerup', () => {
+  clearTimeout(holdT); if (held) return;
+  wake();
+  if (!document.fullscreenElement && document.fullscreenEnabled) goFull();
+  const h = new Date().getHours();
+  if (S.dim && (h >= 23 || h < 6) && Date.now() > peekUntil){ peekUntil = Date.now() + 20000; prev.fill(255); return; } // night: show the full display for 20 s
+  nextView();
+});
+cv.addEventListener('pointercancel', () => clearTimeout(holdT));
+cv.addEventListener('contextmenu', e => e.preventDefault());
+setTimeout(() => hint.style.opacity = 0, 7000);
+
+const $ = id => document.getElementById(id), status = $('status');
+function openSettings(){
+  $('city').value = S.city || ''; $('h12').value = S.h12 ? '1' : '0'; $('unit').value = S.unit;
+  $('rotate').checked = S.rotate; $('dim').checked = S.dim; $('anim').value = S.anim;
+  status.textContent = S.lat != null ? 'Weather for ' + S.city : 'No city set yet.';
+  spRender();
+  panel.hidden = false;
+}
+function spRender(){
+  const on = !!sp.refresh, secure = window.isSecureContext && !!crypto.subtle;
+  $('spState').textContent = spErr ? spErr
+    : on ? 'Connected. The song shows on the clock while something is playing on your account.'
+    : secure ? 'Paste the Client ID of your Spotify developer app, then tap Connect.'
+    : 'Open this page from an https:// address to connect Spotify. It cannot sign in from a local file.';
+  $('spConnectRow').hidden = on || !secure; $('spUriNote').hidden = on || !secure; $('spOffRow').hidden = !on;
+  $('spUri').textContent = redirectUri();
+  $('spClient').value = sp.clientId || '';
+}
+$('spGo').onclick = async () => {
+  const id = $('spClient').value.trim();
+  if (!/^[0-9a-f]{32}$/i.test(id)){ spErr = 'That does not look like a Client ID. It is 32 letters and numbers, shown on your app\'s page in the Spotify developer dashboard.'; spRender(); return; }
+  spErr = '';
+  try { await spConnect(id); } catch (e){ spErr = e.message; spRender(); }
+};
+$('spOff').onclick = () => { sp = {clientId: sp.clientId}; spSave(); np = null; spErr = ''; spRender(); };
+async function setPlace(p){ S.lat = p.lat; S.lon = p.lon; S.city = p.label; save(); status.textContent = 'Weather for ' + p.label; await fetchWeather(); }
+$('find').onclick = async () => {
+  const n = $('city').value.trim(); if (!n) { status.textContent = 'Type a city name first.'; return; }
+  status.textContent = 'Searching…';
+  try { await setPlace(await geocode(n)); } catch (e) { status.textContent = e.message || 'Search failed. Check the internet connection.'; }
+};
+$('geo').onclick = () => {
+  if (!navigator.geolocation){ status.textContent = 'This browser cannot share location. Type a city instead.'; return; }
+  status.textContent = 'Getting location…';
+  navigator.geolocation.getCurrentPosition(
+    p => setPlace({lat:+p.coords.latitude.toFixed(3), lon:+p.coords.longitude.toFixed(3), label:'My location'}),
+    () => status.textContent = 'Location was blocked. Type a city instead.', {timeout:15000});
+};
+$('form').addEventListener('submit', e => {
+  e.preventDefault();
+  const unit = $('unit').value, unitChanged = unit !== S.unit;
+  S.h12 = $('h12').value === '1'; S.unit = unit; S.rotate = $('rotate').checked; S.dim = $('dim').checked; S.anim = $('anim').value;
+  save(); panel.hidden = true; prev.fill(255);
+  if (unitChanged){ wx = null; fetchWeather(); }
+});
+
+/* ---------- start ---------- */
+addEventListener('resize', resize);
+resize();
+(async () => {
+  if (q.has('city') && !q.has('lat') && q.get('city') !== S.city){ try { const p = await geocode(q.get('city')); S.lat=p.lat; S.lon=p.lon; S.city=p.label; save(); } catch {} }
+  fetchWeather();
+})();
+spFinishLogin().then(() => { if (spErr) openSettings(); });
+spPoll();
+setInterval(spPoll, 5000);
+setInterval(fetchWeather, 15*60*1000);
+setInterval(tick, 125);
+
+/* ---------- auto-update: reload when a newer version of this page is published ---------- */
+const pageHash = async () => {
+  const t = await (await fetch(location.pathname + '?v=' + Date.now(), {cache:'no-store'})).text();
+  let h = 5381; for (let i=0;i<t.length;i++) h = (h*33 ^ t.charCodeAt(i)) >>> 0;
+  return t.length + ':' + h;
+};
+if (location.protocol.startsWith('http')){
+  let mine = null;
+  pageHash().then(h => mine = h).catch(() => {});
+  setInterval(async () => {
+    if (!mine || !panel.hidden || document.visibilityState !== 'visible') return;
+    try { const h = await pageHash(); if (h !== mine) location.reload(); } catch {}
+  }, 60000);
+}
+tick();
+})();
+</script>
+</body>
+</html>
