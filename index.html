@@ -6,6 +6,9 @@
 <meta name="theme-color" content="#000000">
 <meta name="mobile-web-app-capable" content="yes">
 <title>Dot Desk Clock</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <style>
 /* One full-screen LED matrix (96 x 44 dots) drawn on a canvas; settings live in an overlay.
    Open copies check for a newer version every minute and reload themselves. */
@@ -756,6 +759,9 @@ spPoll();
 setInterval(spPoll, 5000);
 setInterval(fetchWeather, 15*60*1000);
 setInterval(tick, 125);
+
+/* ---------- installable app: register the offline helper (https or localhost only) ---------- */
+if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 /* ---------- auto-update: reload when a newer version of this page is published ---------- */
 const pageHash = async () => {
