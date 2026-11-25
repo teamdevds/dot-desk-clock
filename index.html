@@ -537,9 +537,14 @@ function sprite(color){
   gr.addColorStop(0, color); gr.addColorStop(.6, color); gr.addColorStop(.72, rgba(color,.28)); gr.addColorStop(1, rgba(color,0));
   g.fillStyle = gr; g.fillRect(0,0,s,s); return c;
 }
+// If the screen is taller than wide (Android kept it in portrait), draw the matrix turned 90° clockwise,
+// so it reads correctly with the phone lying on its side (top of the phone to the left).
+let ROT = false;
 function resize(){
-  const dpr = window.devicePixelRatio || 1, W = Math.round(innerWidth*dpr), H = Math.round(innerHeight*dpr);
-  cv.width = W; cv.height = H;
+  const dpr = window.devicePixelRatio || 1, SW = Math.round(innerWidth*dpr), SH = Math.round(innerHeight*dpr);
+  cv.width = SW; cv.height = SH;
+  ROT = SH > SW;
+  const W = ROT ? SH : SW, H = ROT ? SW : SH; // logical landscape size
   P = Math.min(W/COLS, H/ROWS); OX = (W - P*COLS)/2; OY = (H - P*ROWS)/2;
   bg = document.createElement('canvas'); bg.width = W; bg.height = H;
   const g = bg.getContext('2d'); g.fillStyle = '#000'; g.fillRect(0,0,W,H); g.fillStyle = OFF;
@@ -554,7 +559,9 @@ function colorOf(c){
 }
 function draw(alpha){
   const dx = BXf*P, dy = BYf*P;
-  ctx.globalAlpha = 1; ctx.fillStyle = '#000'; ctx.fillRect(0,0,cv.width,cv.height); ctx.drawImage(bg,dx,dy); ctx.globalAlpha = alpha;
+  ctx.setTransform(1,0,0,1,0,0); ctx.globalAlpha = 1; ctx.fillStyle = '#000'; ctx.fillRect(0,0,cv.width,cv.height);
+  if (ROT) ctx.setTransform(0,1,-1,0,cv.width,0);
+  ctx.drawImage(bg,dx,dy); ctx.globalAlpha = alpha;
   for (let i=0;i<buf.length;i++){ const c = buf[i]; if (c) ctx.drawImage(sprites[c] || (sprites[c] = sprite(colorOf(c))), OX+dx+(i%COLS)*P, OY+dy+((i/COLS)|0)*P, P, P); }
 }
 
@@ -749,6 +756,8 @@ $('form').addEventListener('submit', e => {
 
 /* ---------- start ---------- */
 addEventListener('resize', resize);
+// Installed app: ask Android for landscape straight away (a browser tab may refuse until full screen).
+try { screen.orientation && screen.orientation.lock && screen.orientation.lock('landscape').catch(() => {}); } catch {}
 resize();
 (async () => {
   if (q.has('city') && !q.has('lat') && q.get('city') !== S.city){ try { const p = await geocode(q.get('city')); S.lat=p.lat; S.lon=p.lon; S.city=p.label; save(); } catch {} }
